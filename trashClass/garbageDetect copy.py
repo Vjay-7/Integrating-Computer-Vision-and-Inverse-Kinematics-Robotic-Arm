@@ -3,7 +3,7 @@ import torch
 from ultralytics import YOLO
 
 # Load the YOLOv8 model
-model = YOLO('../runs/detect/train/weights/best.pt')  # Adjust the path to your model's weights
+model = YOLO('D:/ThesisV.1/Integrating-Computer-Vision-and-Inverse-Kinematics-Robotic-Arm/trashClass/runs/detect/train/weights/best.pt')  # Adjust the path to your model's weights
 
 # Define class colors
 class_colors = {
@@ -30,7 +30,7 @@ while True:
         break
 
     # Flip the frame vertically and horizontally
-    frame = cv2.flip(frame, -1)
+    frame = cv2.flip(frame, 1)
 
     # Perform detection
     results = model(frame)
