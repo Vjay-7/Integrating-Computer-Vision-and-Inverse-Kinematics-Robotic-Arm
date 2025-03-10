@@ -2,10 +2,10 @@ import cv2
 from ultralytics import YOLO
 
 # Load your trained YOLOv8 model
-model = YOLO("bestn.pt")  # Replace with the path to your model
+model = YOLO("bestn150.pt")  # Replace with the path to your model
 
 # Open the webcam
-cap = cv2.VideoCapture(0)  # 0 for default webcam, change if you have multiple cameras
+cap = cv2.VideoCapture(1)  # 0 for default webcam, change if you have multiple cameras
 
 if not cap.isOpened():
     print("Error: Could not open webcam.")

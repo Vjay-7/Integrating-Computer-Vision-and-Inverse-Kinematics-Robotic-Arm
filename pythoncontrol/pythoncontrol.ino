@@ -18,8 +18,8 @@ int gripperGripSpeed = 15;     // Speed for gripping
 int gripperReleaseSpeed = 30;  // Speed for release
 
 // Gripper constants
-const int GRIPPER_OPEN = 23;   // Open position
-const int GRIPPER_CLOSE = 85;  // Fully closed position
+const int GRIPPER_OPEN = 45;   // Open position
+const int GRIPPER_CLOSE = 87;  // Fully closed position
 const int GRIPPER_MIN = 25;    // Minimum safe closing angle
 
 void setup() {
@@ -147,3 +147,5 @@ void adaptiveGrip() {
     }
     Serial.println("Grip complete");
 }
+
+

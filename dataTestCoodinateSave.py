@@ -4,21 +4,19 @@ import time
 import csv
 import threading
 
-# Configuration
-SERVO_SEQUENCE = [1, 2, 4, 3, 5]  # Sequence for coordinated movements
-GET_SERVO_SEQUENCE = [1, 2, 3, 4, 5]  # Sequence for getting an item
+SERVO_SEQUENCE = [4, 3, 2, 1]
+GET_SERVO_SEQUENCE = [1,4,3,2,5]
 PARK_ANGLES = {
-    1: 100,  # Base
-    2: 45,  # Shoulder
-    3: 0,  # Elbow
-    4: 180,  # Wrist pitch
-    5: 90,  # Wrist roll
+    1: 100,
+    2: 40,
+    3: 86,
+    4: 40,
+    5: 90,
 }
 
-# Global variables
 servo_angles = [90] * 6
-servo_speed = 35
-interpolation_delay = 50
+servo_speed = 30
+interpolation_delay = 20
 
 def connect_serial(port='COM6', baudrate=9600):
     try:
@@ -69,8 +67,6 @@ def move_servos_sequence(ser, angles_dict, sequence=None):
                 scales[servo - 1].set(angle)
             time.sleep(0.5)
 
-
-
 def get_move_servos_sequence(ser, angles_dict, sequence=None):
     if sequence is None:
         sequence = GET_SERVO_SEQUENCE
@@ -97,7 +93,6 @@ def create_servo_controls(root, servo_number, ser):
     label.pack(side=tk.TOP)
 
     if servo_number == 6:
-        # Gripper controls
         grip_frame = tk.Frame(frame)
         grip_frame.pack(side=tk.TOP, pady=5)
         
@@ -111,18 +106,34 @@ def create_servo_controls(root, servo_number, ser):
         
         return None, None
     else:
-        # Regular servo controls
-        scale = tk.Scale(frame, from_=0, to=180, orient=tk.VERTICAL,
-                        length=200, command=lambda val, sn=servo_number: 
-                        adjust_servo(ser, sn, val))
+        if servo_number == 1:
+            scale = tk.Scale(frame, from_=0, to=180, orient=tk.HORIZONTAL,
+                           length=200, command=lambda val, sn=servo_number: 
+                           adjust_servo(ser, sn, val))
+        else:
+            scale = tk.Scale(frame, from_=0, to=180, orient=tk.VERTICAL,
+                           length=200, command=lambda val, sn=servo_number: 
+                           adjust_servo(ser, sn, val))
+            
         scale.set(servo_angles[servo_number - 1])
         scale.pack(side=tk.TOP)
 
         angle_label = tk.Label(frame, text=f"Angle: {servo_angles[servo_number - 1]}")
         angle_label.pack(side=tk.TOP)
+        
+        entry_frame = tk.Frame(frame)
+        entry_frame.pack(side=tk.TOP, pady=5)
+        
+        angle_entry = tk.Entry(entry_frame, width=5)
+        angle_entry.pack(side=tk.LEFT)
+        
+        set_button = tk.Button(entry_frame, text="Set", 
+                             command=lambda sn=servo_number, e=angle_entry: 
+                             set_angle_from_entry(ser, sn, e, scale))
+        set_button.pack(side=tk.LEFT, padx=5)
 
         return scale, angle_label
-
+    
 def adjust_servo(ser, servo_number, angle):
     new_angle = int(float(angle))
     servo_angles[servo_number - 1] = new_angle
@@ -130,11 +141,44 @@ def adjust_servo(ser, servo_number, angle):
     if angle_labels[servo_number - 1]:
         angle_labels[servo_number - 1].config(text=f"Angle: {new_angle}")
 
+def set_angle_from_entry(ser, servo_number, entry_widget, scale_widget):
+    try:
+        angle = int(entry_widget.get())
+        if 0 <= angle <= 180:
+            scale_widget.set(angle)
+        else:
+            print(f"Angle must be between 0 and 180 degrees")
+    except ValueError:
+        print(f"Please enter a valid integer for the angle")
+
+def set_speed_from_entry(ser, entry_widget, scale_widget):
+    try:
+        speed = int(entry_widget.get())
+        if 5 <= speed <= 255:
+            scale_widget.set(speed)
+            global servo_speed
+            servo_speed = speed
+        else:
+            print("Speed must be between 5 and 255")
+    except ValueError:
+        print("Please enter a valid integer for speed")
+
+def set_delay_from_entry(ser, entry_widget, scale_widget):
+    try:
+        delay = int(entry_widget.get())
+        if 10 <= delay <= 200:
+            scale_widget.set(delay)
+            global interpolation_delay
+            interpolation_delay = delay
+        else:
+            print("Smoothness must be between 10 and 200 ms")
+    except ValueError:
+        print("Please enter a valid integer for smoothness")
+
 def create_settings_controls(root, ser):
     frame = tk.Frame(root)
     frame.pack(side=tk.BOTTOM, pady=10)
     
-    # Speed control
     speed_frame = tk.Frame(frame)
     speed_frame.pack(side=tk.TOP, pady=5)
     
@@ -144,7 +188,13 @@ def create_settings_controls(root, ser):
     speed_scale.set(servo_speed)
     speed_scale.pack(side=tk.LEFT, padx=5)
     
-    # Interpolation delay control
+    speed_entry = tk.Entry(speed_frame, width=5)
+    speed_entry.insert(0, str(servo_speed))
+    speed_entry.pack(side=tk.LEFT, padx=5)
+    speed_set_button = tk.Button(speed_frame, text="Set", 
+                               command=lambda: set_speed_from_entry(ser, speed_entry, speed_scale))
+    speed_set_button.pack(side=tk.LEFT)
+    
     delay_frame = tk.Frame(frame)
     delay_frame.pack(side=tk.TOP, pady=5)
     
@@ -154,27 +204,56 @@ def create_settings_controls(root, ser):
     delay_scale.set(interpolation_delay)
     delay_scale.pack(side=tk.LEFT, padx=5)
     
+    delay_entry = tk.Entry(delay_frame, width=5)
+    delay_entry.insert(0, str(interpolation_delay))
+    delay_entry.pack(side=tk.LEFT, padx=5)
+    delay_set_button = tk.Button(delay_frame, text="Set", 
+                               command=lambda: set_delay_from_entry(ser, delay_entry, delay_scale))
+    delay_set_button.pack(side=tk.LEFT)
+    
     return frame
 
-def save_coordinates(x_entry, y_entry):
+def save_coordinates(x_entry, y_entry, csv_path='save_angles.csv'):
     try:
         x = float(x_entry.get())
         y = float(y_entry.get())
+        updated = False
+        rows = []
         
-        with open('save_angles.csv', mode='a', newline='') as file:
+        # Read existing data
+        try:
+            with open(csv_path, mode='r', newline='') as file:
+                reader = csv.reader(file)
+                for row in reader:
+                    if row and abs(float(row[0]) - x) < 0.01 and abs(float(row[1]) - y) < 0.01:
+                        rows.append([x, y] + servo_angles)  # Update existing entry
+                        updated = True
+                    else:
+                        rows.append(row)
+        except FileNotFoundError:
+            pass  # If file doesn't exist, proceed with writing
+        
+        # Write updated data
+        with open(csv_path, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([x, y] + servo_angles)
-            
-        print(f"Saved position: ({x}, {y}) with angles {servo_angles}")
+            writer.writerows(rows)
+            if not updated:
+                writer.writerow([x, y] + servo_angles)  # Append new entry if no update
+        
+        print(f"{'Updated' if updated else 'Saved'} position: ({x}, {y}) with angles {servo_angles}")
     except ValueError as e:
         print(f"Error saving coordinates: {e}")
+    except IOError as e:
+        print(f"Error accessing file at {csv_path}: {e}")
 
-def try_coordinates(ser, x_entry, y_entry):
+
+
+def try_coordinates(ser, x_entry, y_entry, csv_path='save_angles.csv'):
     try:
         x = float(x_entry.get())
         y = float(y_entry.get())
         
-        with open('save_angles.csv', mode='r') as file:
+        with open(csv_path, mode='r') as file:
             reader = csv.reader(file)
             for row in reader:
                 if row and abs(float(row[0]) - x) < 0.01 and abs(float(row[1]) - y) < 0.01:
@@ -186,33 +265,29 @@ def try_coordinates(ser, x_entry, y_entry):
         print("Coordinates not found")
     except ValueError as e:
         print(f"Error with coordinates: {e}")
+    except FileNotFoundError:
+        print(f"CSV file not found at: {csv_path}")
 
 def main():
     global ser, angle_labels, scales
     
-    # Initialize serial connection
     ser = connect_serial()
     if not ser:
         return
     
-    # Create main window
     root = tk.Tk()
     root.title("Robotic Arm Control")
     
-    # Initialize control lists
     angle_labels = []
     scales = []
     
-    # Create servo controls
     for i in range(1, 7):
         scale, angle_label = create_servo_controls(root, i, ser)
         scales.append(scale)
         angle_labels.append(angle_label)
     
-    # Create settings controls
     settings_frame = create_settings_controls(root, ser)
     
-    # Create coordinate controls
     coord_frame = tk.Frame(settings_frame)
     coord_frame.pack(side=tk.TOP, pady=5)
     
@@ -223,20 +298,17 @@ def main():
     tk.Label(coord_frame, text="Y:").pack(side=tk.LEFT)
     y_entry = tk.Entry(coord_frame, width=5)
     y_entry.pack(side=tk.LEFT, padx=5)
-    
+        
     tk.Button(coord_frame, text="Save Position", 
-              command=lambda: save_coordinates(x_entry, y_entry)).pack(side=tk.LEFT, padx=5)
-    
+            command=lambda: save_coordinates(x_entry, y_entry, 'save_angles.csv')).pack(side=tk.LEFT, padx=5)
+
     tk.Button(coord_frame, text="Try Position", 
-              command=lambda: try_coordinates(ser, x_entry, y_entry)).pack(side=tk.LEFT, padx=5)
+            command=lambda: try_coordinates(ser, x_entry, y_entry, 'save_angles.csv')).pack(side=tk.LEFT, padx=5)
     
-    # Create park button
     tk.Button(settings_frame, text="Park", command=park_servos).pack(side=tk.TOP, pady=5)
     
-    # Start the application
     root.mainloop()
     
-    # Clean up
     if ser:
         ser.close()
 
