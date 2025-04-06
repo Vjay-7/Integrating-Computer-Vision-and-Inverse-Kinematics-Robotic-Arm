@@ -2,10 +2,10 @@ import cv2
 from ultralytics import YOLO
 
 # Load your trained YOLOv8 model
-model = YOLO("bestn150.pt")  # Replace with the path to your model
+model = YOLO("12best.pt")  # Replace with the path to your model
 
 # Open the webcam
-cap = cv2.VideoCapture(1)  # 0 for default webcam, change if you have multiple cameras
+cap = cv2.VideoCapture(0)  # 0 for default webcam, change if you have multiple cameras
 
 if not cap.isOpened():
     print("Error: Could not open webcam.")
@@ -18,8 +18,8 @@ while True:
         print("Error: Failed to capture image.")
         break
 
-    # Perform object detection on the frame
-    results = model(frame)
+    # Perform object detection on the frame with a confidence threshold of 0.7
+    results = model(frame, conf=0.7)
 
     # Visualize the results on the frame
     annotated_frame = results[0].plot()

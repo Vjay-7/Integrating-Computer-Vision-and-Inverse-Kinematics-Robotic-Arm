@@ -18,9 +18,8 @@ int gripperGripSpeed = 15;     // Speed for gripping
 int gripperReleaseSpeed = 30;  // Speed for release
 
 // Gripper constants
-const int GRIPPER_OPEN = 45;   // Open position
-const int GRIPPER_CLOSE = 87;  // Fully closed position
-const int GRIPPER_MIN = 25;    // Minimum safe closing angle
+#define GRIPPER_OPEN  40
+#define GRIPPER_CLOSE  87  // Fixed close position
 
 void setup() {
     // Initialize all servos
@@ -31,6 +30,14 @@ void setup() {
     servo5.attach(WRO_SERVO, 544, 2400);
     servo6.attach(GRI_SERVO, 544, 2400);
     
+    // Set initial angles
+    servo1.write(84);
+    servo2.write(77);
+    servo3.write(164);
+    servo4.write(40);
+    servo5.write(90);
+    servo6.write(GRIPPER_OPEN);
+    
     Serial.begin(9600);
     Serial.println("Robotic Arm Controller Started");
     Serial.println("Commands:");
@@ -39,6 +46,7 @@ void setup() {
     Serial.println("- Speed: s [speed] (5-255)");
     Serial.println("- Interpolation: i [delay_ms] (10-200)");
 }
+
 
 // Smooth movement function
 void moveServoSmooth(VarSpeedServo& servo, int currentAngle, int targetAngle, int speed) {
@@ -49,6 +57,16 @@ void moveServoSmooth(VarSpeedServo& servo, int currentAngle, int targetAngle, in
         delay(interpolationDelay);
     }
     servo.write(targetAngle, speed);
+}
+
+void detachGripper() {
+    servo6.detach();
+    Serial.println("Gripper detached");
+}
+
+void attachGripper() {
+    servo6.attach(GRI_SERVO, 544, 2400);
+    Serial.println("Gripper attached");
 }
 
 void loop() {
@@ -70,6 +88,14 @@ void loop() {
                 Serial.println(interpolationDelay);
             }
             return;
+        }
+
+                // In the loop function, after checking for 's' and 'i':
+        else if (firstChar == 'd') {
+            String cmd = Serial.readStringUntil('\n');
+            if (cmd == "d6") {  // Detach command for servo 6
+                detachGripper();
+            }
         }
         
         // Regular servo commands
@@ -108,21 +134,27 @@ void loop() {
             }
             
             case 6:
-                if (angle == -1) {
-                    Serial.println("Releasing gripper");
-                    servo6.write(GRIPPER_OPEN, gripperReleaseSpeed);
-                }
-                else if (angle == -2) {
-                    Serial.println("Starting adaptive grip");
-                    adaptiveGrip();
-                }
-                else {
-                    int safeAngle = constrain(angle, GRIPPER_OPEN, GRIPPER_CLOSE);
-                    Serial.print("Setting gripper to: ");
-                    Serial.println(safeAngle);
-                    servo6.write(safeAngle, gripperGripSpeed);
-                }
-                break;
+            attachGripper();  // Make sure servo is attached before moving
+            
+            if (angle == -1) {
+                // Existing release code
+                servo6.write(GRIPPER_OPEN, gripperReleaseSpeed);
+                delay(500);  // Allow time to complete movement
+                detachGripper();  // Detach after movement completes
+            }
+            else if (angle == -2) {
+                // Existing grip code
+                servo6.write(GRIPPER_CLOSE, gripperGripSpeed);
+                // Don't detach while gripping to maintain force
+            }
+            else {
+                // Existing custom angle code
+                int safeAngle = constrain(angle, GRIPPER_OPEN, GRIPPER_CLOSE);
+                servo6.write(safeAngle, gripperGripSpeed);
+                delay(500);  // Allow time to complete movement
+                detachGripper();  // Detach after movement completes
+            }
+            break;
                 
             default:
                 Serial.println("Invalid servo number");
@@ -130,22 +162,3 @@ void loop() {
         }
     }
 }
-
-void adaptiveGrip() {
-    // Open gripper first
-    servo6.write(GRIPPER_OPEN, gripperReleaseSpeed);
-    delay(500);
-    
-    // Slowly close until resistance or limit
-    for (int angle = GRIPPER_OPEN; angle <= GRIPPER_CLOSE; angle++) {
-        servo6.write(angle, gripperGripSpeed);
-        delay(50);
-        
-        if (angle >= GRIPPER_CLOSE) {
-            break;
-        }
-    }
-    Serial.println("Grip complete");
-}
-
-

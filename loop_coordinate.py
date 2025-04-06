@@ -5,18 +5,22 @@ import csv
 import threading
 
 SERVO_SEQUENCE = [2, 3, 4, 1]
-GET_SERVO_SEQUENCE = [1,4,3,2,5]
+GET_SERVO_SEQUENCE = [1, 4, 3, 2, 5]
 PARK_ANGLES = {
     1: 94,
     2: 77,
     3: 164,
     4: 40,
     5: 90,
+    6: 85,
 }
 
 servo_angles = [94, 77, 164, 40, 90]
 servo_speed = 30
 interpolation_delay = 30
+coordinate_delay = 3  # variable_1: delay at coordinate position (in seconds)Q
+parking_delay = 2  # variable_2: delay at parking position (in seconds)
+sequence_running = False
 
 def connect_serial(port='COM6', baudrate=9600):
     try:
@@ -82,12 +86,88 @@ def get_move_servos_sequence(ser, angles_dict, sequence=None):
                 scales[servo - 1].set(angle)
             time.sleep(0.5)
 
-
-def move_to_color_preset(ser, angles_dict):
-    move_servos_sequence(ser, angles_dict)
-    
 def park_servos():
     move_servos_sequence(ser, PARK_ANGLES)
+
+def read_coordinates_from_csv(csv_path='sorted_output.csv'):
+    coordinates = []
+    try:
+        with open(csv_path, mode='r') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                if len(row) >= 7:  # x, y, and 5 servo angles
+                    x = float(row[0])
+                    y = float(row[1])
+                    angles = {i+1: int(float(row[i+2])) for i in range(5)}
+                    coordinates.append((x, y, angles))
+        print(f"Loaded {len(coordinates)} coordinates from CSV")
+        return coordinates
+    except FileNotFoundError:
+        print(f"CSV file not found at: {csv_path}")
+        return []
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return []
+
+def execute_coordinate_sequence(ser, status_label, progress_label):
+    global sequence_running
+    
+    coordinates = read_coordinates_from_csv()
+    if not coordinates:
+        status_label.config(text="No coordinates found in CSV file")
+        sequence_running = False
+        return
+    
+    total_coordinates = len(coordinates)
+    current_coordinate = 0
+    
+    while sequence_running and current_coordinate < total_coordinates:
+        x, y, angles = coordinates[current_coordinate]
+        
+        # Update status display
+        status_label.config(text=f"Executing coordinate: ({x}, {y})")
+        progress_label.config(text=f"Progress: {current_coordinate + 1}/{total_coordinates}")
+        
+        # Move to parking position
+        park_servos()
+        
+        # Move to coordinate position
+        get_move_servos_sequence(ser, angles)
+        
+        # Wait at coordinate position (variable_1)
+        time.sleep(coordinate_delay)
+        
+        # Move back to parking position
+        park_servos()
+        
+        # Wait at parking position (variable_2)
+        time.sleep(parking_delay)
+        
+        # Move to next coordinate
+        current_coordinate += 1
+    
+    status_label.config(text="Sequence execution completed" if current_coordinate == total_coordinates else "Sequence stopped")
+    sequence_running = False
+
+def start_sequence(ser, start_button, status_label, progress_label):
+    global sequence_running
+    
+    if sequence_running:
+        sequence_running = False
+        start_button.config(text="Start Sequence")
+        status_label.config(text="Sequence stopped")
+    else:
+        sequence_running = True
+        start_button.config(text="Stop Sequence")
+        status_label.config(text="Starting sequence...")
+        
+        # Run the sequence in a separate thread to avoid freezing the GUI
+        sequence_thread = threading.Thread(
+            target=execute_coordinate_sequence,
+            args=(ser, status_label, progress_label)
+        )
+        sequence_thread.daemon = True
+        sequence_thread.start()
 
 def create_servo_controls(root, servo_number, ser):
     frame = tk.Frame(root)
@@ -153,7 +233,6 @@ def adjust_servo(ser, servo_number, angle):
     if angle_labels[servo_number - 1]:
         angle_labels[servo_number - 1].config(text=f"Angle: {new_angle}")
 
-
 def set_angle_from_entry(ser, servo_number, entry_widget, scale_widget):
     try:
         angle = int(entry_widget.get())
@@ -172,7 +251,6 @@ def set_angle_from_entry(ser, servo_number, entry_widget, scale_widget):
     except ValueError:
         print(f"Please enter a valid integer for the angle")
 
-
 def set_speed_from_entry(ser, entry_widget, scale_widget):
     try:
         speed = int(entry_widget.get())
@@ -180,6 +258,7 @@ def set_speed_from_entry(ser, entry_widget, scale_widget):
             scale_widget.set(speed)
             global servo_speed
             servo_speed = speed
+            set_servo_speed(ser, speed)
         else:
             print("Speed must be between 5 and 255")
     except ValueError:
@@ -192,15 +271,41 @@ def set_delay_from_entry(ser, entry_widget, scale_widget):
             scale_widget.set(delay)
             global interpolation_delay
             interpolation_delay = delay
+            set_interpolation_delay(ser, delay)
         else:
             print("Smoothness must be between 10 and 200 ms")
     except ValueError:
         print("Please enter a valid integer for smoothness")
 
+def set_coordinate_delay_from_entry(entry_widget, scale_widget):
+    try:
+        delay = float(entry_widget.get())
+        if 0.1 <= delay <= 30:
+            scale_widget.set(delay)
+            global coordinate_delay
+            coordinate_delay = delay
+        else:
+            print("Coordinate delay must be between 0.1 and 30 seconds")
+    except ValueError:
+        print("Please enter a valid number for coordinate delay")
+
+def set_parking_delay_from_entry(entry_widget, scale_widget):
+    try:
+        delay = float(entry_widget.get())
+        if 0.1 <= delay <= 30:
+            scale_widget.set(delay)
+            global parking_delay
+            parking_delay = delay
+        else:
+            print("Parking delay must be between 0.1 and 30 seconds")
+    except ValueError:
+        print("Please enter a valid number for parking delay")
+
 def create_settings_controls(root, ser):
     frame = tk.Frame(root)
     frame.pack(side=tk.BOTTOM, pady=10)
     
+    # Speed controls
     speed_frame = tk.Frame(frame)
     speed_frame.pack(side=tk.TOP, pady=5)
     
@@ -217,6 +322,7 @@ def create_settings_controls(root, ser):
                                command=lambda: set_speed_from_entry(ser, speed_entry, speed_scale))
     speed_set_button.pack(side=tk.LEFT)
     
+    # Interpolation delay controls
     delay_frame = tk.Frame(frame)
     delay_frame.pack(side=tk.TOP, pady=5)
     
@@ -233,7 +339,62 @@ def create_settings_controls(root, ser):
                                command=lambda: set_delay_from_entry(ser, delay_entry, delay_scale))
     delay_set_button.pack(side=tk.LEFT)
     
-    return frame
+    # Coordinate delay controls (variable_1)
+    coord_delay_frame = tk.Frame(frame)
+    coord_delay_frame.pack(side=tk.TOP, pady=5)
+    
+    tk.Label(coord_delay_frame, text="Coord Delay (0.1-30s):").pack(side=tk.LEFT)
+    coord_delay_scale = tk.Scale(coord_delay_frame, from_=0.1, to=30, resolution=0.1, orient=tk.HORIZONTAL,
+                                command=lambda v: globals().update(coordinate_delay=float(v)))
+    coord_delay_scale.set(coordinate_delay)
+    coord_delay_scale.pack(side=tk.LEFT, padx=5)
+    
+    coord_delay_entry = tk.Entry(coord_delay_frame, width=5)
+    coord_delay_entry.insert(0, str(coordinate_delay))
+    coord_delay_entry.pack(side=tk.LEFT, padx=5)
+    coord_delay_set_button = tk.Button(coord_delay_frame, text="Set", 
+                                     command=lambda: set_coordinate_delay_from_entry(coord_delay_entry, coord_delay_scale))
+    coord_delay_set_button.pack(side=tk.LEFT)
+    
+    # Parking delay controls (variable_2)
+    park_delay_frame = tk.Frame(frame)
+    park_delay_frame.pack(side=tk.TOP, pady=5)
+    
+    tk.Label(park_delay_frame, text="Park Delay (0.1-30s):").pack(side=tk.LEFT)
+    park_delay_scale = tk.Scale(park_delay_frame, from_=0.1, to=30, resolution=0.1, orient=tk.HORIZONTAL,
+                               command=lambda v: globals().update(parking_delay=float(v)))
+    park_delay_scale.set(parking_delay)
+    park_delay_scale.pack(side=tk.LEFT, padx=5)
+    
+    park_delay_entry = tk.Entry(park_delay_frame, width=5)
+    park_delay_entry.insert(0, str(parking_delay))
+    park_delay_entry.pack(side=tk.LEFT, padx=5)
+    park_delay_set_button = tk.Button(park_delay_frame, text="Set", 
+                                    command=lambda: set_parking_delay_from_entry(park_delay_entry, park_delay_scale))
+    park_delay_set_button.pack(side=tk.LEFT)
+    
+    # Create sequence status display
+    status_frame = tk.Frame(frame)
+    status_frame.pack(side=tk.TOP, pady=10)
+    
+    status_label = tk.Label(status_frame, text="Ready to start sequence", font=("Arial", 12))
+    status_label.pack(side=tk.TOP)
+    
+    progress_label = tk.Label(status_frame, text="", font=("Arial", 10))
+    progress_label.pack(side=tk.TOP)
+    
+    # Create control buttons
+    button_frame = tk.Frame(frame)
+    button_frame.pack(side=tk.TOP, pady=5)
+    
+    start_button = tk.Button(button_frame, text="Start Sequence", 
+                           command=lambda: start_sequence(ser, start_button, status_label, progress_label))
+    start_button.pack(side=tk.LEFT, padx=5)
+    
+    park_button = tk.Button(button_frame, text="Park", command=park_servos)
+    park_button.pack(side=tk.LEFT, padx=5)
+    
+    return frame, status_label, progress_label
 
 def save_coordinates(x_entry, y_entry, csv_path='save_angles.csv'):
     try:
@@ -263,12 +424,20 @@ def save_coordinates(x_entry, y_entry, csv_path='save_angles.csv'):
                 writer.writerow([x, y] + servo_angles)  # Append new entry if no update
         
         print(f"{'Updated' if updated else 'Saved'} position: ({x}, {y}) with angles {servo_angles}")
+        
+        # After saving, park the servos
+        park_servos()
+        
+        # Wait for 1 second
+        time.sleep(1)
+        
+        # Try the newly saved coordinate
+        try_coordinates(ser, x_entry, y_entry, csv_path)
+        
     except ValueError as e:
         print(f"Error saving coordinates: {e}")
     except IOError as e:
         print(f"Error accessing file at {csv_path}: {e}")
-
-
 
 def try_coordinates(ser, x_entry, y_entry, csv_path='save_angles.csv'):
     try:
@@ -289,9 +458,6 @@ def try_coordinates(ser, x_entry, y_entry, csv_path='save_angles.csv'):
         print(f"Error with coordinates: {e}")
     except FileNotFoundError:
         print(f"CSV file not found at: {csv_path}")
-        
-        
-
 
 def main():
     global ser, angle_labels, scales
@@ -301,7 +467,7 @@ def main():
         return
     
     root = tk.Tk()
-    root.title("Robotic Arm Control")
+    root.title("Robotic Arm Sequence Controller")
     
     angle_labels = []
     scales = []
@@ -311,7 +477,7 @@ def main():
         scales.append(scale)
         angle_labels.append(angle_label)
     
-    settings_frame = create_settings_controls(root, ser)
+    settings_frame, status_label, progress_label = create_settings_controls(root, ser)
     
     coord_frame = tk.Frame(settings_frame)
     coord_frame.pack(side=tk.TOP, pady=5)
@@ -329,11 +495,6 @@ def main():
 
     tk.Button(coord_frame, text="Try Position", 
             command=lambda: try_coordinates(ser, x_entry, y_entry, 'save_angles.csv')).pack(side=tk.LEFT, padx=5)
-    
-    tk.Button(settings_frame, text="Park", command=park_servos).pack(side=tk.LEFT, padx=5)
-    tk.Button(settings_frame, text="Red", command=lambda: move_to_color_preset(ser, {1: 141, 2: 114, 3: 133, 4: 153, 5: 90})).pack(side=tk.LEFT, padx=5)
-    tk.Button(settings_frame, text="Blue", command=lambda: move_to_color_preset(ser, {1: 94, 2: 96, 3: 133, 4: 153, 5: 90})).pack(side=tk.LEFT, padx=5)
-    tk.Button(settings_frame, text="Black", command=lambda: move_to_color_preset(ser, {1: 57, 2: 114, 3: 133, 4: 153, 5: 90})).pack(side=tk.LEFT, padx=5)
     
     root.mainloop()
     
