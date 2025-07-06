@@ -166,7 +166,7 @@ def detect_objects(frame, model, scale=1):
     
     return detections
 
-def try_coordinates(ser, x, y, orientation, csv_path='save_angles.csv'):
+def try_coordinates(ser, x, y, orientation, csv_path='save_angles_update.csv'):
     """Move robot arm to specified coordinates and adjust for object orientation"""
     try:
         with open(csv_path, mode='r') as file:

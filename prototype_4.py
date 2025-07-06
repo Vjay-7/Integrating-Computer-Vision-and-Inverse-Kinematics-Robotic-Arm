@@ -44,9 +44,13 @@ video_label = None
 update_frame_event = threading.Event()
 grid_center_x_offset = 0
 grid_center_y_offset = 0
+object_list = []
+current_attempt_counts = {}
+problematic_objects = []
+visual_verification_active = True
 
 # Serial connection functions
-def connect_serial(port='COM6', baudrate=9600):
+def connect_serial(port='COM3', baudrate=9600):
     try:
         ser = serial.Serial(port, baudrate, timeout=1)
         print(f"Connected to {port}")
@@ -146,7 +150,7 @@ def detect_objects(frame, model, scale=1):
             grid_x, grid_y = get_coordinate_from_pixel(center_point_x, center_point_y, center_x, center_y, unit_pixel, scale)
             
             obj_width, obj_height = x2 - x1, y2 - y1
-            orientation = "horizontal" if obj_width > obj_height * 1.2 else "vertical"
+            orientation = "horizontal" if obj_width > obj_height * 1.5 else "vertical"
             
             class_id = int(result.boxes.cls[i])
             
@@ -387,6 +391,313 @@ def draw_coordinate_plane(frame, scale, detections=None, current_object=None):
     
     return frame_with_overlay
 
+
+def initial_object_scan(cap, model, scale):
+    """Take a baseline image and create a priority-sorted list of all objects detected"""
+    global object_list
+    
+    print("Performing initial object scan...")
+    
+    # Capture frame
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to capture initial scan frame")
+        return []
+    
+    # Store a copy of the frame
+    frame_copy = frame.copy()
+    
+    # Detect objects
+    detections = detect_objects(frame, model, scale)
+    
+    # Create a fresh object list with attempt counts
+    object_list = []
+    for obj in detections:
+        obj_id = obj["id"]
+        current_attempt_counts[obj_id] = 0
+        # Store the frame with each object
+        obj["frame"] = frame_copy
+        object_list.append(obj)
+    
+    # Sort by priority
+    object_list.sort(key=lambda x: x["priority"])
+    
+    print(f"Initial scan complete. Found {len(object_list)} objects to process")
+    return object_list
+ 
+def update_verification_images(self, before_frame, after_frame, target_obj):
+    if before_frame is None or after_frame is None:
+        return
+        
+    # Resize frames to fit in the UI
+    height, width = before_frame.shape[:2]
+    max_height = 150  # Set to desired height
+    scale = max_height / height
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    
+    before_resized = cv2.resize(before_frame.copy(), (new_width, new_height))
+    after_resized = cv2.resize(after_frame.copy(), (new_width, new_height))
+    
+    # Add text and circle highlighting target object
+    cv2.putText(before_resized, "BEFORE", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(after_resized, "AFTER", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    
+    # Draw circles at target object location
+    center_x = int(target_obj.get("pixel_center_x", 0) * scale)
+    center_y = int(target_obj.get("pixel_center_y", 0) * scale)
+    
+    cv2.circle(before_resized, (center_x, center_y), 8, (0, 0, 255), 2)
+    cv2.circle(after_resized, (center_x, center_y), 8, (0, 0, 255), 2)
+    
+    # Add verification status text
+    if target_obj.get("verification_success", False):
+        status_text = "VERIFICATION SUCCESS"
+        color = (0, 255, 0)  # Green
+    else:
+        status_text = "VERIFICATION FAILED"
+        color = (0, 0, 255)  # Red
+    
+    cv2.putText(after_resized, status_text, (10, new_height-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    
+    # Convert to format suitable for tkinter
+    before_img = cv2.cvtColor(before_resized, cv2.COLOR_BGR2RGB)
+    before_img = Image.fromarray(before_img)
+    before_img = ImageTk.PhotoImage(image=before_img)
+    
+    after_img = cv2.cvtColor(after_resized, cv2.COLOR_BGR2RGB)
+    after_img = Image.fromarray(after_img)
+    after_img = ImageTk.PhotoImage(image=after_img)
+    
+    # Update labels
+    self.before_label.config(image=before_img)
+    self.before_label.image = before_img
+    
+    self.after_label.config(image=after_img)
+    self.after_label.image = after_img
+    
+def visual_verification(cap, model, scale, target_obj):
+    """Check if the object was successfully picked up by comparing before/after images"""
+    print(f"Performing visual verification for {target_obj['name']}...")
+    
+    # Store the "before" frame (from object_list creation)
+    before_frame = target_obj.get("frame", None)
+    
+    # Capture "after" frame
+    ret, after_frame = cap.read()
+    if not ret:
+        print("Failed to capture verification frame")
+        return False
+    
+    # Detect objects in new frame
+    current_detections = detect_objects(after_frame, model, scale)
+    
+    # Check if the target object is still present
+    target_id = target_obj["id"]
+    target_class = target_obj["class_id"]
+    target_x, target_y = target_obj["x"], target_obj["y"]
+    
+    success = True
+    for obj in current_detections:
+        # Check if this is the same object based on class and position (with some tolerance)
+        if obj["class_id"] == target_class:
+            distance = ((obj["x"] - target_x)**2 + (obj["y"] - target_y)**2)**0.5
+            if distance < 0.7:  # Tolerance of 0.5 grid units
+                print(f"Verification FAILED: {target_obj['name']} still detected at position")
+                success = False
+                break
+    
+    # Store verification result in the object
+    target_obj["verification_success"] = success
+    
+    # Display the verification frames in the main UI
+    if before_frame is not None and after_frame is not None and app:
+        app.update_verification_images(before_frame, after_frame, target_obj)
+    
+    if success:
+        print(f"Verification SUCCESS: {target_obj['name']} successfully removed")
+    
+    return success
+def disarrangement_strategy(ser, obj):
+    """Perform a gentle push to disarrange an object that's difficult to pick up"""
+    print(f"Executing disarrangement strategy for {obj['name']} at ({obj['x']}, {obj['y']})")
+    
+    # Open gripper
+    release_gripper(ser)
+    time.sleep(0.5)
+    
+    # Move to object position
+    try_coordinates(ser, obj['x'], obj['y'], obj['orientation'])
+    time.sleep(0.5)
+    
+    # Get current servo1 angle for later movements
+    current_servo1_angle = servo_angles[0]  # Servo 1 (0-indexed)
+    
+    # Rotate servo5 to 180 degrees
+    send_command(ser, 5, 180)
+    time.sleep(0.5)
+    
+    # Rotate servo5 back to 90 degrees
+    send_command(ser, 5, 90)
+    time.sleep(0.5)
+    
+    # Move servo1 +30 degrees from current position
+    new_angle_plus = min(current_servo1_angle + 20, 180)  # Ensure we don't exceed servo limits
+    send_command(ser, 1, new_angle_plus)
+    time.sleep(0.5)
+    
+    # Move servo1 -60 degrees from the current position (meaning -30 from original position)
+    new_angle_minus = max(current_servo1_angle - 20, 0) 
+    send_command(ser, 1, new_angle_minus)
+    time.sleep(0.5)
+    
+    # Return servo1 to original position
+    send_command(ser, 1, current_servo1_angle)
+    time.sleep(0.5)
+    
+    # Return to parking position
+    park_servos(ser)
+    
+    print("Disarrangement strategy complete")
+    
+    
+def process_object_with_verification(ser, obj, cap, model, scale):
+    """Complete sequence to pick up an object with visual verification"""
+    obj_id = obj['id']
+    print(f"\nAttempting to process {obj['name']} at ({obj['x']}, {obj['y']})")
+    
+    if app:
+        app.current_object = obj
+        app.update_status(f"Processing: {obj['name']}", "green")
+        update_frame_event.set()
+    
+    # Start with arm in parking position and gripper open
+    park_servos(ser)
+    release_gripper(ser)
+    time.sleep(1)
+    
+    # Move to object position
+    success = try_coordinates(ser, obj['x'], obj['y'], obj['orientation'])
+    if not success:
+        print(f"Failed to move to object position")
+        return False
+    
+    # Grab object
+    time.sleep(0.5)
+    start_gripping(ser)
+    time.sleep(1)
+    
+    # Move to parking position with object
+    park_servos(ser)
+    time.sleep(1)
+    
+    # Verify if pickup was successful
+    if visual_verification_active:
+        pickup_success = visual_verification(cap, model, scale, obj)
+    else:
+        pickup_success = True  # Assume success if verification is disabled
+    
+    if pickup_success:
+        # Move to appropriate bin based on object class
+        bin_color = obj['bin']
+        move_to_bin(ser, bin_color)
+        time.sleep(1)
+        
+        # Release object
+        release_gripper(ser)
+        time.sleep(1)
+        
+        # Return to parking position
+        park_servos(ser)
+        
+        print(f"Successfully placed {obj['name']} in {bin_color} bin")
+        
+        if app:
+            app.update_status(f"Placed {obj['name']} in {bin_color} bin", "green")
+            update_frame_event.set()
+        
+        # Remove object from the list
+        return True
+    else:
+        # Release the object and return to parking
+        release_gripper(ser)
+        park_servos(ser)
+        
+        # Update attempt count
+        current_attempt_counts[obj_id] = current_attempt_counts.get(obj_id, 0) + 1
+        
+        if app:
+            app.update_status(f"Failed to pick up {obj['name']}", "red")
+            update_frame_event.set()
+        
+        return False
+    
+
+def enhanced_processing_thread(ser, model, cap, scale):
+    """Thread for continuous object detection and processing with verification and retry logic"""
+    global processing_active, object_list, current_attempt_counts, problematic_objects
+    
+    processing_active = True
+    print("Starting enhanced automatic object processing...")
+
+    # Update status in the UI
+    if app:
+        app.update_status("PROCESSING ACTIVE", "green")
+    
+    # Initial scan to populate object list
+    object_list = initial_object_scan(cap, model, scale)
+    
+    while processing_active:
+        # Process all objects in the list
+        while object_list and processing_active:
+            # Select highest priority object
+            obj = object_list[0]
+            obj_id = obj["id"]
+            
+            # Process the object with verification
+            success = process_object_with_verification(ser, obj, cap, model, scale)
+            
+            if success:
+                # Remove from list on success
+                object_list.remove(obj)
+                current_attempt_counts[obj_id] = 0
+            else:
+                # Handle failure based on attempt count
+                attempts = current_attempt_counts[obj_id]
+                
+                if attempts >= 2:
+                    # Execute disarrangement strategy
+                    disarrangement_strategy(ser, obj)
+                    
+                    # Reset attempt counter
+                    current_attempt_counts[obj_id] = 0
+                    
+                    # Rescan to update positions
+                    object_list = initial_object_scan(cap, model, scale)
+                else:
+                    # Move object to end of list for retry later
+                    object_list.remove(obj)
+                    object_list.append(obj)
+        
+        # If all objects processed or processing stopped, check for new objects
+        if processing_active:
+            print("Completed current object list. Scanning for new objects...")
+            object_list = initial_object_scan(cap, model, scale)
+            
+            # If no new objects, wait and try again
+            if not object_list:
+                print("No objects detected, waiting...")
+                time.sleep(2)
+                object_list = initial_object_scan(cap, model, scale)
+    
+    print("Enhanced automatic processing stopped")
+    
+    # Update status in the UI
+    if app:
+        app.update_status("Press 'p' to start processing", "black")
+        
+
+
 class WasteSortingApp:
     def __init__(self, root, ser):
         self.root = root
@@ -394,216 +705,272 @@ class WasteSortingApp:
         self.ser = ser
         self.scale = 1
         self.current_object = None
-        
+
         self.root.configure(bg="#f0f0f0")
         self.root.geometry("1400x900")
-        
+
         # Create frames
+        self.main_frame = ttk.Frame(root)
+        self.main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.control_frame = ttk.Frame(root, padding="10")
         self.control_frame.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.video_frame = ttk.Frame(root)
-        self.video_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Video display
+
+        # Video display frame with camera feed
+        self.video_frame = ttk.Frame(self.main_frame)
+        self.video_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         self.video_label = ttk.Label(self.video_frame)
         self.video_label.pack(fill=tk.BOTH, expand=True)
-        
+
+        # Verification frame for before/after images
+        self.verification_frame = ttk.Frame(self.main_frame)
+        self.verification_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.before_label = ttk.Label(self.verification_frame)
+        self.before_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.after_label = ttk.Label(self.verification_frame)
+        self.after_label.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
         # Control panels
         self.create_servo_controls()
         self.create_action_controls()
         self.create_status_panel()
-        
+
         # Initialize servo sliders with default values
-        self.speed_slider.set(servo_speed)
-        self.delay_slider.set(interpolation_delay)
-        
+        self.speed_var.set(str(servo_speed))
+        self.delay_var.set(str(interpolation_delay))
+
         # Apply styles
         style = ttk.Style()
         style.configure('TButton', font=('Arial', 12))
         style.configure('TLabel', font=('Arial', 12))
         style.configure('TFrame', background='#f0f0f0')
-        
+
         # Set global video_label for access from other functions
         global video_label
         video_label = self.video_label
-        
+
         # Set global app reference
         global app
         app = self
-    
-    def update_grid_y_position(self, value):
-        global grid_center_y_offset
-        grid_center_y_offset = int(float(value))
-        self.grid_y_value.config(text=str(grid_center_y_offset))
-        update_frame_event.set()
 
-    def update_grid_x_position(self, value):
-        global grid_center_x_offset
-        grid_center_x_offset = int(float(value))
-        self.grid_x_value.config(text=str(grid_center_x_offset))
-        update_frame_event.set()
     def create_servo_controls(self):
         control_panel = ttk.LabelFrame(self.control_frame, text="Servo Controls", padding="10")
         control_panel.pack(fill=tk.X, pady=10)
-        
-        # Servo speed control
-        ttk.Label(control_panel, text="Servo Speed:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.speed_slider = ttk.Scale(
-            control_panel, 
-            from_=5, 
-            to=100, 
-            orient=tk.HORIZONTAL, 
-            length=200,
-            command=self.update_servo_speed
-        )
-        self.speed_slider.grid(row=0, column=1, pady=5)
-        self.speed_value = ttk.Label(control_panel, text="30")
-        self.speed_value.grid(row=0, column=2, padx=5)
-        
-        # Interpolation delay control
-        ttk.Label(control_panel, text="Interpolation Delay:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.delay_slider = ttk.Scale(
-            control_panel, 
-            from_=5, 
-            to=50, 
-            orient=tk.HORIZONTAL, 
-            length=200,
-            command=self.update_interpolation_delay
-        )
-        self.delay_slider.grid(row=1, column=1, pady=5)
-        self.delay_value = ttk.Label(control_panel, text="15")
-        self.delay_value.grid(row=1, column=2, padx=5)
-        
-        # Grid scale control
-        ttk.Label(control_panel, text="Grid Scale:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.scale_slider = ttk.Scale(
-            control_panel, 
-            from_=1, 
-            to=10, 
-            orient=tk.HORIZONTAL, 
-            length=200,
-            command=self.update_grid_scale
-        )
-        self.scale_slider.set(self.scale)
-        self.scale_slider.grid(row=2, column=1, pady=5)
-        self.scale_value = ttk.Label(control_panel, text="1")
-        self.scale_value.grid(row=2, column=2, padx=5)
-        
-        # Grid position controls
-        ttk.Label(control_panel, text="Grid Vertical Position:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.grid_y_slider = ttk.Scale(
-            control_panel, 
-            from_=-100, 
-            to=100, 
-            orient=tk.HORIZONTAL, 
-            length=200,
-            command=self.update_grid_y_position
-        )
-        self.grid_y_slider.set(grid_center_y_offset)
-        self.grid_y_slider.grid(row=3, column=1, pady=5)
-        self.grid_y_value = ttk.Label(control_panel, text="0")
-        self.grid_y_value.grid(row=3, column=2, padx=5)
 
-        ttk.Label(control_panel, text="Grid Horizontal Position:").grid(row=4, column=0, sticky=tk.W, pady=5)
-        self.grid_x_slider = ttk.Scale(
-            control_panel, 
-            from_=-200,  # Changed from -100 to -150
-            to=100, 
-            orient=tk.HORIZONTAL, 
-            length=200,
-            command=self.update_grid_x_position
-        )
-        self.grid_x_slider.set(grid_center_x_offset)
-        self.grid_x_slider.grid(row=4, column=1, pady=5)
-        self.grid_x_value = ttk.Label(control_panel, text="0")
-        self.grid_x_value.grid(row=4, column=2, padx=5)
-    
+        # Servo speed
+        speed_frame = ttk.Frame(control_panel)
+        speed_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(speed_frame, text="Servo Speed:").pack(side=tk.LEFT)
+        self.speed_var = tk.StringVar()
+        speed_entry = ttk.Entry(speed_frame, textvariable=self.speed_var, width=5)
+        speed_entry.pack(side=tk.RIGHT)
+        speed_entry.bind("<Return>", lambda e: self.update_servo_speed())
+
+        # Interpolation delay
+        delay_frame = ttk.Frame(control_panel)
+        delay_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(delay_frame, text="Interpolation Delay:").pack(side=tk.LEFT)
+        self.delay_var = tk.StringVar()
+        delay_entry = ttk.Entry(delay_frame, textvariable=self.delay_var, width=5)
+        delay_entry.pack(side=tk.RIGHT)
+        delay_entry.bind("<Return>", lambda e: self.update_interpolation_delay())
+
+        # Grid scale
+        scale_frame = ttk.Frame(control_panel)
+        scale_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(scale_frame, text="Grid Scale:").pack(side=tk.LEFT)
+        self.scale_var = tk.StringVar(value=str(self.scale))
+        scale_entry = ttk.Entry(scale_frame, textvariable=self.scale_var, width=5)
+        scale_entry.pack(side=tk.RIGHT)
+        scale_entry.bind("<Return>", lambda e: self.update_grid_scale())
+
+        # Grid position Y
+        grid_y_frame = ttk.Frame(control_panel)
+        grid_y_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(grid_y_frame, text="Grid Vertical Position:").pack(side=tk.LEFT)
+        self.grid_y_var = tk.StringVar(value=str(grid_center_y_offset))
+        grid_y_entry = ttk.Entry(grid_y_frame, textvariable=self.grid_y_var, width=5)
+        grid_y_entry.pack(side=tk.RIGHT)
+        grid_y_entry.bind("<Return>", lambda e: self.update_grid_y_position())
+
+        # Grid position X
+        grid_x_frame = ttk.Frame(control_panel)
+        grid_x_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(grid_x_frame, text="Grid Horizontal Position:").pack(side=tk.LEFT)
+        self.grid_x_var = tk.StringVar(value=str(grid_center_x_offset))
+        grid_x_entry = ttk.Entry(grid_x_frame, textvariable=self.grid_x_var, width=5)
+        grid_x_entry.pack(side=tk.RIGHT)
+        grid_x_entry.bind("<Return>", lambda e: self.update_grid_x_position())
+
     def create_action_controls(self):
         action_panel = ttk.LabelFrame(self.control_frame, text="Actions", padding="10")
         action_panel.pack(fill=tk.X, pady=10)
-        
-        # Start/stop processing button
-        self.process_button = ttk.Button(
-            action_panel, 
-            text="Start Processing (p)", 
-            command=self.toggle_processing
-        )
+
+        self.process_button = ttk.Button(action_panel, text="Start Processing (p)", command=self.toggle_processing)
         self.process_button.pack(fill=tk.X, pady=5)
-        
-        # Park servos button
-        ttk.Button(
-            action_panel, 
-            text="Park Position", 
-            command=lambda: park_servos(self.ser)
-        ).pack(fill=tk.X, pady=5)
-        
-        # Open/close gripper buttons
+
+        ttk.Button(action_panel, text="Park Position", command=lambda: park_servos(self.ser)).pack(fill=tk.X, pady=5)
+
         gripper_frame = ttk.Frame(action_panel)
         gripper_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Button(
-            gripper_frame, 
-            text="Open Gripper", 
-            command=lambda: release_gripper(self.ser)
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        
-        ttk.Button(
-            gripper_frame, 
-            text="Close Gripper", 
-            command=lambda: start_gripping(self.ser)
-        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=2)
-        
-        # Quit button
-        ttk.Button(
-            action_panel, 
-            text="Quit (q)", 
-            command=self.quit_app
-        ).pack(fill=tk.X, pady=5)
-    
+
+        ttk.Button(gripper_frame, text="Open Gripper", command=lambda: release_gripper(self.ser)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(gripper_frame, text="Close Gripper", command=lambda: start_gripping(self.ser)).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=2)
+
+        ttk.Button(action_panel, text="Quit (q)", command=self.quit_app).pack(fill=tk.X, pady=5)
+
     def create_status_panel(self):
         status_panel = ttk.LabelFrame(self.control_frame, text="Status", padding="10")
         status_panel.pack(fill=tk.X, pady=10)
-        
-        self.status_label = ttk.Label(
-            status_panel, 
-            text="Ready", 
-            font=('Arial', 14, 'bold')
-        )
+
+        self.status_label = ttk.Label(status_panel, text="Ready", font=('Arial', 14, 'bold'))
         self.status_label.pack(pady=5)
-        
-        # Object info frame
+
         object_info = ttk.LabelFrame(status_panel, text="Current Object", padding="5")
         object_info.pack(fill=tk.X, pady=5)
-        
+
         self.object_name_label = ttk.Label(object_info, text="None")
         self.object_name_label.pack(fill=tk.X, pady=2)
-        
+
         self.object_pos_label = ttk.Label(object_info, text="Position: -")
         self.object_pos_label.pack(fill=tk.X, pady=2)
-        
+
         self.object_bin_label = ttk.Label(object_info, text="Bin: -")
         self.object_bin_label.pack(fill=tk.X, pady=2)
-    
-    def update_servo_speed(self, value):
+
+        verification_frame = ttk.Frame(status_panel)
+        verification_frame.pack(fill=tk.X, pady=5)
+
+        self.verification_var = tk.BooleanVar(value=True)
+        verification_check = ttk.Checkbutton(
+            verification_frame,
+            text="Enable Visual Verification",
+            variable=self.verification_var,
+            command=self.toggle_verification
+        )
+        verification_check.pack(side=tk.LEFT)
+
+        stats_frame = ttk.LabelFrame(status_panel, text="Statistics", padding="5")
+        stats_frame.pack(fill=tk.X, pady=5)
+
+        self.objects_processed_label = ttk.Label(stats_frame, text="Objects Processed: 0")
+        self.objects_processed_label.pack(fill=tk.X, pady=2)
+
+        self.failed_attempts_label = ttk.Label(stats_frame, text="Failed Attempts: 0")
+        self.failed_attempts_label.pack(fill=tk.X, pady=2)
+
+    def toggle_verification(self):
+        global visual_verification_active
+        visual_verification_active = self.verification_var.get()
+        print(f"Visual verification {'enabled' if visual_verification_active else 'disabled'}")
+
+    def update_servo_speed(self):
         global servo_speed
-        servo_speed = int(float(value))
-        self.speed_value.config(text=str(servo_speed))
-        set_servo_speed(self.ser, servo_speed)
-    
-    def update_interpolation_delay(self, value):
+        try:
+            servo_speed = int(self.speed_var.get())
+            set_servo_speed(self.ser, servo_speed)
+        except ValueError:
+            self.speed_var.set(str(servo_speed))
+
+    def update_interpolation_delay(self):
         global interpolation_delay
-        interpolation_delay = int(float(value))
-        self.delay_value.config(text=str(interpolation_delay))
-        set_interpolation_delay(self.ser, interpolation_delay)
-    
-    def update_grid_scale(self, value):
-        self.scale = int(float(value))
-        self.scale_value.config(text=str(self.scale))
-        update_frame_event.set()
-    
+        try:
+            interpolation_delay = int(self.delay_var.get())
+            set_interpolation_delay(self.ser, interpolation_delay)
+        except ValueError:
+            self.delay_var.set(str(interpolation_delay))
+
+    def update_grid_scale(self):
+        try:
+            self.scale = int(self.scale_var.get())
+            update_frame_event.set()
+        except ValueError:
+            self.scale_var.set(str(self.scale))
+
+    def update_grid_y_position(self):
+        global grid_center_y_offset
+        try:
+            grid_center_y_offset = int(self.grid_y_var.get())
+            update_frame_event.set()
+        except ValueError:
+            self.grid_y_var.set(str(grid_center_y_offset))
+
+    def update_grid_x_position(self):
+        global grid_center_x_offset
+        try:
+            grid_center_x_offset = int(self.grid_x_var.get())
+            update_frame_event.set()
+        except ValueError:
+            self.grid_x_var.set(str(grid_center_x_offset))
+
     def toggle_processing(self):
         global processing_active
+        if processing_active:
+            processing_active = False
+            self.process_button.config(text="Start Processing (p)")
+            self.update_status("Ready", "black")
+        else:
+            self.process_button.config(text="Stop Processing (p)")
+            self.update_status("Starting...", "orange")
+            self.root.event_generate('<KeyPress-p>')
+
+    def update_status(self, text, color="black"):
+        self.status_label.config(text=text, foreground=color)
+        if self.current_object:
+            obj = self.current_object
+            self.object_name_label.config(text=f"Type: {obj['name']}")
+            self.object_pos_label.config(text=f"Position: ({obj['x']}, {obj['y']})")
+            self.object_bin_label.config(text=f"Bin: {obj['bin']}")
+        else:
+            self.object_name_label.config(text="None")
+            self.object_pos_label.config(text="Position: -")
+            self.object_bin_label.config(text="Bin: -")
+
+    def quit_app(self):
+        global processing_active
+        processing_active = False
+        self.root.quit()
+
+        
+def update_interpolation_delay(self):
+    global interpolation_delay
+    try:
+        interpolation_delay = int(self.delay_var.get())
+        set_interpolation_delay(self.ser, interpolation_delay)
+    except ValueError:
+        # Reset to previous value if invalid input
+        self.delay_var.set(str(interpolation_delay))
+
+    def update_grid_scale(self):
+        try:
+            self.scale = int(self.scale_var.get())
+            update_frame_event.set()
+        except ValueError:
+            # Reset to previous value if invalid input
+            self.scale_var.set(str(self.scale))
+
+    def update_grid_y_position(self):
+        global grid_center_y_offset
+        try:
+            grid_center_y_offset = int(self.grid_y_var.get())
+            update_frame_event.set()
+        except ValueError:
+            # Reset to previous value if invalid input
+            self.grid_y_var.set(str(grid_center_y_offset))
+
+    def update_grid_x_position(self):
+        global grid_center_x_offset
+        try:
+            grid_center_x_offset = int(self.grid_x_var.get())
+            update_frame_event.set()
+        except ValueError:
+            # Reset to previous value if invalid input
+            self.grid_x_var.set(str(grid_center_x_offset))
+        
+        def toggle_processing(self):
+            global processing_active
         
         if processing_active:
             processing_active = False
@@ -721,9 +1088,9 @@ def main():
                     process_thread.join()
                     app.process_button.config(text="Start Processing (p)")
             else:
-                # Start new processing thread
+                # Start new processing thread with enhanced version
                 process_thread = threading.Thread(
-                    target=processing_thread,
+                    target=enhanced_processing_thread,
                     args=(ser, model, cap, app.scale)
                 )
                 process_thread.daemon = True

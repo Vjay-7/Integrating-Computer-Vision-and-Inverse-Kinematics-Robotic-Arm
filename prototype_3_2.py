@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 
 # Robotic arm constants
 SERVO_SEQUENCE = [2, 3, 4, 1]
+BIN_SERVO_SEQUENCE = [1, 2, 3, 4]
 GET_SERVO_SEQUENCE = [5, 1, 4, 3, 2, ]
 PARK_ANGLES = {
     1: 94,
@@ -22,16 +23,16 @@ PARK_ANGLES = {
 
 # Predefined bin positions
 BIN_POSITIONS = {
-    "blue": {1: 141, 2: 114, 3: 133, 4: 153, 5: 90},    # Biodegradable
-    "black": {1: 94, 2: 96, 3: 133, 4: 153, 5: 90},   # Non-biodegradable
-    "red": {1: 57, 2: 114, 3: 133, 4: 153, 5: 90}       # Recyclable
+    "blue": {1: 162, 2: 153, 3: 175, 4: 123, 5: 90},    # Biodegradable
+    "black": {1: 100, 2: 109, 3: 180, 4: 170, 5: 90},   # Non-biodegradable
+    "red": {1: 31, 2: 169, 3: 143, 4: 95, 5: 90}       # Recyclable
 }
 
 # Computer vision constants
 CLASS_MAPPING = {
-    0: {"name": "Biodegradable", "bin": "black", "priority": 2, "color": (0, 0, 255)},  # Red
-    1: {"name": "Non-Biodegradable", "bin": "blue", "priority": 1, "color": (0, 255, 0)},      # Green
-    2: {"name": "Recyclable", "bin": "red", "priority": 3, "color": (255, 255, 0)}        # Yellow
+    0: {"name": "Recyclable Paper", "bin": "black", "priority": 2, "color": (0, 0, 255)},  # Red
+    1: {"name": "Residual", "bin": "blue", "priority": 1, "color": (0, 255, 0)},     # Green
+    2: {"name": "Recyclable Bottle", "bin": "red", "priority": 3, "color": (255, 255, 0)}        # Yellow
 }
 
 # Global variables
@@ -42,11 +43,15 @@ processing_active = False
 app = None
 video_label = None
 update_frame_event = threading.Event()
-grid_center_x_offset = 0
-grid_center_y_offset = 0
+grid_center_x_offset = -150
+grid_center_y_offset = 100
+object_list = []
+current_attempt_counts = {}
+problematic_objects = []
+visual_verification_active = True
 
 # Serial connection functions
-def connect_serial(port='COM6', baudrate=9600):
+def connect_serial(port='COM6', baudrate=9600):    
     try:
         ser = serial.Serial(port, baudrate, timeout=1)
         print(f"Connected to {port}")
@@ -77,6 +82,21 @@ def set_interpolation_delay(ser, delay):
 def release_gripper(ser):
     send_command(ser, 6, -1)
     print("Gripper released")
+    
+def release_gripper_bin(ser):
+    current_servo5_angle = servo_angles[4]
+    
+    send_command(ser, 6, 20) 
+    time.sleep(0.5)
+    
+    # Shake motion - rotate servo5 to 155 degrees quickly
+    send_command(ser, 5, 155)
+    time.sleep(0.3)
+    
+    send_command(ser, 5, current_servo5_angle)
+    time.sleep(0.3)
+    
+    print("Gripper released at bin position with shake motion")
 
 def start_gripping(ser):
     send_command(ser, 6, -2)
@@ -105,10 +125,14 @@ def get_move_servos_sequence(ser, angles_dict, sequence=None):
             if servo <= 5:  # Update servo_angles only for servos 1-5
                 servo_angles[servo - 1] = angle
             time.sleep(0.5)
+            
+def release_gripper_bin(ser):
+    send_command(ser, 6, 20)  # 20 degrees for bin release
+    print("Gripper released at bin position")
 
 def move_to_bin(ser, bin_color):
     print(f"Moving to {bin_color} bin")
-    move_servos_sequence(ser, BIN_POSITIONS[bin_color])
+    move_servos_sequence(ser, BIN_POSITIONS[bin_color], BIN_SERVO_SEQUENCE)
 
 def park_servos(ser):
     print("Moving to parking position")
@@ -173,7 +197,7 @@ def detect_objects(frame, model, scale=1):
                 detections.append(detection)
     
     # Sort detections by priority
-    detections.sort(key=lambda x: x["priority"])
+    detections.sort(key=lambda x: x["confidence"], reverse=True)
     
     return detections
 
@@ -216,7 +240,7 @@ def pick_and_place_object(ser, obj_data):
         
     # Start with arm in parking position and gripper open
     park_servos(ser)
-    release_gripper(ser)
+    release_gripper_bin(ser)
     time.sleep(1)
     
     # Move to object position
@@ -236,7 +260,7 @@ def pick_and_place_object(ser, obj_data):
     time.sleep(3)
     
     # Release object
-    release_gripper(ser)
+    release_gripper_bin(ser)
     time.sleep(1.5)
     
     # Return to parking position
@@ -365,7 +389,7 @@ def draw_coordinate_plane(frame, scale, detections=None, current_object=None):
             cv2.circle(frame_with_overlay, (center_point_x, center_point_y), 8, color, -1)
             
             # Draw label with confidence
-            label = f"{obj['name']} ({obj['x']},{obj['y']}) {obj['orientation']} {obj['confidence']:.2f}"
+            label = f"{obj['name']} ({obj['x']},{obj['y']}) {obj['orientation']} CONF:{obj['confidence']:.2f}"
             cv2.putText(
                 frame_with_overlay, 
                 label,
@@ -386,6 +410,341 @@ def draw_coordinate_plane(frame, scale, detections=None, current_object=None):
     )
     
     return frame_with_overlay
+
+
+def initial_object_scan(cap, model, scale):
+    """Take a baseline image and create a priority-sorted list of all objects detected"""
+    global object_list
+    
+    print("Performing initial object scan...")
+    
+    # Capture frame
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to capture initial scan frame")
+        return []
+    
+    # Store a copy of the frame
+    frame_copy = frame.copy()
+    
+    # Detect objects
+    detections = detect_objects(frame, model, scale)
+    
+    # Create a fresh object list with attempt counts
+    object_list = []
+    for obj in detections:
+        obj_id = obj["id"]
+        current_attempt_counts[obj_id] = 0
+        # Store the frame with each object
+        obj["frame"] = frame_copy
+        object_list.append(obj)
+    
+    # Sort by priority
+    object_list.sort(key=lambda x: x["confidence"], reverse=True)
+    
+    print(f"Initial scan complete. Found {len(object_list)} objects to process")
+    return object_list
+
+def show_verification_frames(before_frame, after_frame, target_obj):
+    """Display before and after frames for visual verification in a separate window"""
+    # Calculate the maximum width and height that would fit well on most monitors
+    max_display_width = 1200
+    max_display_height = 800
+    
+    # Get original dimensions
+    h, w = before_frame.shape[:2]
+    
+    # Calculate scaling factor to fit within maximum dimensions
+    # We'll stack images vertically, so total height will be 2*h
+    scale_factor = min(max_display_width / w, max_display_height / (2*h))
+    
+    # Resize frames if needed
+    if scale_factor < 1:
+        new_width = int(w * scale_factor)
+        new_height = int(h * scale_factor)
+        before_frame_resized = cv2.resize(before_frame.copy(), (new_width, new_height))
+        after_frame_resized = cv2.resize(after_frame.copy(), (new_width, new_height))
+    else:
+        before_frame_resized = before_frame.copy()
+        after_frame_resized = after_frame.copy()
+    
+    # Get new dimensions
+    h_new, w_new = before_frame_resized.shape[:2]
+    
+    # Create a stacked image with before on top and after on bottom
+    combined = np.zeros((h_new*2, w_new, 3), dtype=np.uint8)
+    
+    # Add before frame on top
+    combined[:h_new, :] = before_frame_resized
+    cv2.putText(combined, "BEFORE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    
+    # Add after frame on bottom
+    combined[h_new:, :] = after_frame_resized
+    cv2.putText(combined, "AFTER", (10, h_new+30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    
+    # Calculate scaled position for circles
+    center_x = target_obj.get("pixel_center_x", 0)
+    center_y = target_obj.get("pixel_center_y", 0)
+    
+    if scale_factor < 1:
+        center_x = int(center_x * scale_factor)
+        center_y = int(center_y * scale_factor)
+    
+    # Draw circles at target object location on both frames
+    cv2.circle(combined, (center_x, center_y), 15, (0, 0, 255), 2)  # Circle on before image
+    # Drawing a faded circle on the after image at the same x position
+    cv2.circle(combined, (center_x, center_y + h_new), 15, (0, 0, 255), 2)
+    
+    # Add verification status text
+    if target_obj.get("verification_success", False):
+        status_text = "VERIFICATION SUCCESS: Object removed"
+        color = (0, 255, 0)  # Green
+    else:
+        status_text = "VERIFICATION FAILED: Object still present"
+        color = (0, 0, 255)  # Red
+    
+    cv2.putText(combined, status_text, (10, 2*h_new-20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    
+    # Show the combined image
+    cv2.namedWindow("Verification Frames", cv2.WINDOW_NORMAL)
+    cv2.imshow("Verification Frames", combined)
+    cv2.resizeWindow("Verification Frames", w_new, h_new*2)
+    cv2.waitKey(1)  # Update the window
+
+def visual_verification(cap, model, scale, target_obj):
+    """Check if the object was successfully picked up by comparing before/after images"""
+    print(f"Performing visual verification for {target_obj['name']}...")
+    
+    # Store the "before" frame (from object_list creation)
+    before_frame = target_obj.get("frame", None)
+    
+    # Capture "after" frame
+    ret, after_frame = cap.read()
+    if not ret:
+        print("Failed to capture verification frame")
+        return False
+    
+    # Detect objects in new frame
+    current_detections = detect_objects(after_frame, model, scale)
+    
+    # Get target object properties for comparison
+    target_id = target_obj["id"]
+    target_class = target_obj["class_id"]
+    target_x, target_y = target_obj["x"], target_obj["y"]
+    
+    # Define adjacent cells to check (original position + up, down, left, right)
+    check_positions = [
+        (target_x, target_y),  # Original position
+        (target_x, target_y + 1),  # Up
+        (target_x, target_y - 1),  # Down
+        (target_x + 1, target_y),  # Right
+        (target_x - 1, target_y)   # Left
+    ]
+    
+    # Assume success until proven otherwise
+    success = True
+    
+    # Check if the target object is still present at original or adjacent positions
+    for obj in current_detections:
+        # Only check objects of the same class
+        if obj["class_id"] == target_class:
+            # Check if object is at original or adjacent coordinates
+            if (obj["x"], obj["y"]) in check_positions:
+                position_found = (obj["x"], obj["y"])
+                print(f"Verification FAILED: {target_obj['name']} still detected at position {position_found}")
+                success = False
+                break
+    
+    # Store verification result in the object for later reference
+    target_obj["verification_success"] = success
+    
+    # Display the verification frames if both frames are available
+    if before_frame is not None and after_frame is not None:
+        show_verification_frames(before_frame, after_frame, target_obj)
+    
+    if success:
+        print(f"Verification SUCCESS: {target_obj['name']} successfully removed from ({target_x}, {target_y})")
+    
+    return success
+
+def disarrangement_strategy(ser, obj):
+    """Perform a gentle push to disarrange an object that's difficult to pick up"""
+    print(f"Executing disarrangement strategy for {obj['name']} at ({obj['x']}, {obj['y']})")
+    
+    # Open gripper
+    release_gripper(ser)
+    time.sleep(0.5)
+    
+    # Move to object position
+    try_coordinates(ser, obj['x'], obj['y'], obj['orientation'])
+    time.sleep(0.5)
+    
+    # Get current servo1 angle for later movements
+    current_servo1_angle = servo_angles[0]  # Servo 1 (0-indexed)
+    
+    # Rotate servo5 to 180 degrees
+    send_command(ser, 5, 180)
+    time.sleep(0.5)
+    
+    # Rotate servo5 back to 90 degrees
+    send_command(ser, 5, 90)
+    time.sleep(0.5)
+    
+    # Move servo1 +30 degrees from current position
+    new_angle_plus = min(current_servo1_angle + 20, 180)  # Ensure we don't exceed servo limits
+    send_command(ser, 1, new_angle_plus)
+    time.sleep(0.5)
+    
+    # Move servo1 -60 degrees from the current position (meaning -30 from original position)
+    new_angle_minus = max(current_servo1_angle - 20, 0) 
+    send_command(ser, 1, new_angle_minus)
+    time.sleep(0.5)
+    
+    # Return servo1 to original position
+    send_command(ser, 1, current_servo1_angle)
+    time.sleep(0.5)
+    
+    # Return to parking position
+    park_servos(ser)
+    
+    print("Disarrangement strategy complete")
+    
+    
+def process_object_with_verification(ser, obj, cap, model, scale):
+    """Complete sequence to pick up an object with visual verification"""
+    obj_id = obj['id']
+    print(f"\nAttempting to process {obj['name']} at ({obj['x']}, {obj['y']})")
+    
+    if app:
+        app.current_object = obj
+        app.update_status(f"Processing: {obj['name']}", "green")
+        update_frame_event.set()
+    
+    # Start with arm in parking position and gripper open
+    park_servos(ser)
+    release_gripper_bin(ser)
+    time.sleep(1)
+    
+    # Move to object position
+    success = try_coordinates(ser, obj['x'], obj['y'], obj['orientation'])
+    if not success:
+        print(f"Failed to move to object position")
+        return False
+    
+    # Grab object
+    time.sleep(0.5)
+    start_gripping(ser)
+    time.sleep(1)
+    
+    # Move to parking position with object
+    park_servos(ser)
+    time.sleep(1)
+    
+    # Verify if pickup was successful
+    if visual_verification_active:
+        pickup_success = visual_verification(cap, model, scale, obj)
+    else:
+        pickup_success = True  # Assume success if verification is disabled
+    
+    if pickup_success:
+        # Move to appropriate bin based on object class
+        bin_color = obj['bin']
+        move_to_bin(ser, bin_color)
+        time.sleep(1)
+        
+        # Release object
+        release_gripper_bin(ser)
+        time.sleep(1)
+        
+        # Return to parking position
+        park_servos(ser)
+        
+        print(f"Successfully placed {obj['name']} in {bin_color} bin")
+        
+        if app:
+            app.update_status(f"Placed {obj['name']} in {bin_color} bin", "green")
+            update_frame_event.set()
+        
+        # Remove object from the list
+        return True
+    else:
+        # Quick failure handling - release and update attempt count immediately
+        release_gripper(ser)
+        current_attempt_counts[obj_id] = current_attempt_counts.get(obj_id, 0) + 1
+        
+        if app:
+            app.update_status(f"Failed to pick up {obj['name']}", "red")
+            update_frame_event.set()
+        
+        print(f"Pickup failed for {obj['name']}")
+        # Note: park_servos will be called at the start of the next attempt
+        return False
+    
+
+def enhanced_processing_thread(ser, model, cap, scale):
+    """Thread for continuous object detection and processing with verification and retry logic"""
+    global processing_active, object_list, current_attempt_counts, problematic_objects
+    
+    processing_active = True
+    print("Starting enhanced automatic object processing...")
+
+    # Update status in the UI
+    if app:
+        app.update_status("PROCESSING ACTIVE", "green")
+    
+    # Initial scan to populate object list
+    object_list = initial_object_scan(cap, model, scale)
+    
+    while processing_active:
+        # Process all objects in the list
+        while object_list and processing_active:
+            # Select highest priority object
+            obj = object_list[0]
+            obj_id = obj["id"]
+            
+            # Process the object with verification
+            success = process_object_with_verification(ser, obj, cap, model, scale)
+            
+            if success:
+                # Remove from list on success
+                object_list.remove(obj)
+                current_attempt_counts[obj_id] = 0
+            else:
+                # Handle failure based on attempt count
+                attempts = current_attempt_counts[obj_id]
+                
+                if attempts >= 2:
+                    # Execute disarrangement strategy
+                    disarrangement_strategy(ser, obj)
+                    
+                    # Reset attempt counter
+                    current_attempt_counts[obj_id] = 0
+                    
+                    # Rescan to update positions
+                    object_list = initial_object_scan(cap, model, scale)
+                else:
+                    # Move object to end of list for retry later
+                    object_list.remove(obj)
+                    object_list.append(obj)
+        
+        # If all objects processed or processing stopped, check for new objects
+        if processing_active:
+            print("Completed current object list. Scanning for new objects...")
+            object_list = initial_object_scan(cap, model, scale)
+            
+            # If no new objects, wait and try again
+            if not object_list:
+                print("No objects detected, waiting...")
+                time.sleep(2)
+                object_list = initial_object_scan(cap, model, scale)
+    
+    print("Enhanced automatic processing stopped")
+    
+    # Update status in the UI
+    if app:
+        app.update_status("Press 'p' to start processing", "black")
+        
+
 
 class WasteSortingApp:
     def __init__(self, root, ser):
@@ -584,6 +943,25 @@ class WasteSortingApp:
         
         self.object_bin_label = ttk.Label(object_info, text="Bin: -")
         self.object_bin_label.pack(fill=tk.X, pady=2)
+        
+            # Add verification toggle
+        verification_frame = ttk.Frame(status_panel)
+        verification_frame.pack(fill=tk.X, pady=5)
+        
+        self.verification_var = tk.BooleanVar(value=True)
+        verification_check = ttk.Checkbutton(
+            verification_frame,
+            text="Enable Visual Verification",
+            variable=self.verification_var,
+            command=self.toggle_verification
+        )
+        verification_check.pack(side=tk.LEFT)
+        
+        
+    def toggle_verification(self):
+        global visual_verification_active
+        visual_verification_active = self.verification_var.get()
+        print(f"Visual verification {'enabled' if visual_verification_active else 'disabled'}")
     
     def update_servo_speed(self, value):
         global servo_speed
@@ -688,7 +1066,7 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
     # Load YOLO model
-    model = YOLO('computerVision/11_best_100.pt')
+    model = YOLO('computerVision/yolov12-100v6.pt')
     
     # Initialize robot
     set_servo_speed(ser, servo_speed)
@@ -721,9 +1099,9 @@ def main():
                     process_thread.join()
                     app.process_button.config(text="Start Processing (p)")
             else:
-                # Start new processing thread
+                # Start new processing thread with enhanced version
                 process_thread = threading.Thread(
-                    target=processing_thread,
+                    target=enhanced_processing_thread,
                     args=(ser, model, cap, app.scale)
                 )
                 process_thread.daemon = True

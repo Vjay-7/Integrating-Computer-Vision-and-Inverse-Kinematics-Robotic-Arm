@@ -2,7 +2,7 @@ import cv2
 from ultralytics import YOLO
 
 # Load your trained YOLOv8 model
-model = YOLO("12best.pt")  # Replace with the path to your model
+model = YOLO("yolo11_v6.pt")  # Replace with the path to your model
 
 # Open the webcam
 cap = cv2.VideoCapture(0)  # 0 for default webcam, change if you have multiple cameras

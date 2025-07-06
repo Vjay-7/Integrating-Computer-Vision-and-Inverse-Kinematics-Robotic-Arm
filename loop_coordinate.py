@@ -8,8 +8,8 @@ SERVO_SEQUENCE = [2, 3, 4, 1]
 GET_SERVO_SEQUENCE = [1, 4, 3, 2, 5]
 PARK_ANGLES = {
     1: 94,
-    2: 77,
-    3: 164,
+    2: 88,
+    3: 149,
     4: 40,
     5: 90,
     6: 85,
@@ -21,6 +21,8 @@ interpolation_delay = 30
 coordinate_delay = 3  # variable_1: delay at coordinate position (in seconds)Q
 parking_delay = 2  # variable_2: delay at parking position (in seconds)
 sequence_running = False
+repetition_count = 5  # Default repetition count
+repetition_delay = 1  # Default delay between repetitions (in seconds)
 
 def connect_serial(port='COM6', baudrate=9600):
     try:
@@ -89,7 +91,7 @@ def get_move_servos_sequence(ser, angles_dict, sequence=None):
 def park_servos():
     move_servos_sequence(ser, PARK_ANGLES)
 
-def read_coordinates_from_csv(csv_path='sorted_output.csv'):
+def read_coordinates_from_csv(csv_path='save_angles.csv'):
     coordinates = []
     try:
         with open(csv_path, mode='r') as file:
@@ -300,6 +302,81 @@ def set_parking_delay_from_entry(entry_widget, scale_widget):
             print("Parking delay must be between 0.1 and 30 seconds")
     except ValueError:
         print("Please enter a valid number for parking delay")
+        
+def repeat_coordinate(ser, x_entry, y_entry, count_entry, delay_entry, csv_path='save_angles.csv'):
+    try:
+        x = float(x_entry.get())
+        y = float(y_entry.get())
+        count = int(count_entry.get())
+        delay = float(delay_entry.get())
+        
+        if count <= 0:
+            print("Repetition count must be greater than 0")
+            return
+            
+        if delay < 0:
+            print("Delay must be non-negative")
+            return
+            
+        # Find the coordinate in the CSV
+        with open(csv_path, mode='r') as file:
+            reader = csv.reader(file)
+            coordinate_found = False
+            for row in reader:
+                if row and abs(float(row[0]) - x) < 0.01 and abs(float(row[1]) - y) < 0.01:
+                    angles = {i+1: int(float(row[i+2])) for i in range(5)}
+                    coordinate_found = True
+                    break
+        
+        if not coordinate_found:
+            print(f"Coordinates ({x}, {y}) not found in CSV")
+            return
+            
+        print(f"Starting repetition: ({x}, {y}) - {count} times with {delay}s delay")
+        
+        for i in range(count):
+            print(f"Repetition {i+1}/{count}")
+            
+            # Park position
+            park_servos()
+            time.sleep(0.5)
+            
+            # Move to coordinate
+            get_move_servos_sequence(ser, angles)
+            time.sleep(0.5)
+            
+            # Wait before next repetition
+            time.sleep(delay)
+            
+        # Final park
+        park_servos()
+        print("Repetition sequence completed")
+        
+    except ValueError as e:
+        print(f"Error with input values: {e}")
+    except FileNotFoundError:
+        print(f"CSV file not found at: {csv_path}")
+        
+
+def add_repetition_controls(coord_frame, ser, x_entry, y_entry):
+    rep_frame = tk.Frame(coord_frame)
+    rep_frame.pack(side=tk.TOP, pady=5)
+    
+    tk.Label(rep_frame, text="Repetitions:").pack(side=tk.LEFT)
+    count_entry = tk.Entry(rep_frame, width=5)
+    count_entry.insert(0, str(repetition_count))
+    count_entry.pack(side=tk.LEFT, padx=5)
+    
+    tk.Label(rep_frame, text="Delay (s):").pack(side=tk.LEFT)
+    delay_entry = tk.Entry(rep_frame, width=5)
+    delay_entry.insert(0, str(repetition_delay))
+    delay_entry.pack(side=tk.LEFT, padx=5)
+    
+    tk.Button(rep_frame, text="Repeat Position", 
+            command=lambda: repeat_coordinate(ser, x_entry, y_entry, count_entry, delay_entry, 'save_angles.csv')
+            ).pack(side=tk.LEFT, padx=5)
+    
+    return rep_frame
 
 def create_settings_controls(root, ser):
     frame = tk.Frame(root)
@@ -486,6 +563,7 @@ def main():
     x_entry = tk.Entry(coord_frame, width=5)
     x_entry.pack(side=tk.LEFT, padx=5)
     
+    
     tk.Label(coord_frame, text="Y:").pack(side=tk.LEFT)
     y_entry = tk.Entry(coord_frame, width=5)
     y_entry.pack(side=tk.LEFT, padx=5)
@@ -495,6 +573,9 @@ def main():
 
     tk.Button(coord_frame, text="Try Position", 
             command=lambda: try_coordinates(ser, x_entry, y_entry, 'save_angles.csv')).pack(side=tk.LEFT, padx=5)
+    
+    # Add repetition controls AFTER creating the entry widgets
+    add_repetition_controls(settings_frame, ser, x_entry, y_entry)
     
     root.mainloop()
     
